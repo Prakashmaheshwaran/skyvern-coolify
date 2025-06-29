@@ -20,6 +20,11 @@ services:
       # - ./alembic:/app/alembic
     environment:
       - ENABLE_CODE_BLOCK=true
+    networks:
+      default:
+        external: true
+        name: skyvern-net
+
     healthcheck:
       test: ["CMD", "test", "-f", "/app/.streamlit/secrets.toml"]
       interval: 5s
