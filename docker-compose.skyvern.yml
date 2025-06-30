@@ -21,12 +21,8 @@ services:
     environment:
       - ENABLE_CODE_BLOCK=true
     networks:
-      default:
-        external: true
-        name: skyvern-net
+      - skyvern-net
 
-    healthcheck:
-      test: ["CMD", "test", "-f", "/app/.streamlit/secrets.toml"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+networks:
+  skyvern-net:
+    external: true
