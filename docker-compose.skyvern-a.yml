@@ -1,0 +1,28 @@
+version: '3.9'
+
+services:
+  skyvern:
+    image: public.ecr.aws/skyvern/skyvern:latest
+    restart: on-failure
+    ports:
+      - "8001:8000"        # Skyvern API
+      - "9223:9222"        # For browser automation via CDP
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/data/artifacts
+      - ./videos:/data/videos
+      - ./har:/data/har
+      - ./log:/data/log
+      - ./.streamlit:/app/.streamlit
+      # Optional: mount local code for dev
+      # - ./skyvern:/app/skyvern
+      # - ./alembic:/app/alembic
+    environment:
+      - ENABLE_CODE_BLOCK=true
+    networks:
+      - skyvern-net
+
+networks:
+  skyvern-net:
+    external: true
