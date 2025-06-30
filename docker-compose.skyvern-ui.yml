@@ -16,11 +16,3 @@ services:
       - skyvern-frontend/.env
     environment:
       - VITE_ENABLE_CODE_BLOCK=true
-    depends_on:
-      skyvern:
-        condition: service_healthy
-
-networks:
-  default:
-    external: true
-    name: skyvern-net
