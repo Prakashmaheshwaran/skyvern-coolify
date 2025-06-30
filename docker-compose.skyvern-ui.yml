@@ -11,7 +11,7 @@ services:
       - ./artifacts:/data/artifacts
       - ./videos:/data/videos
       - ./har:/data/har
-      - /home/ubuntu/skyvern-ui-streamlit:/app/.streamlit
+      - ./.streamlit:/app/.streamlit
     env_file:
       - skyvern-frontend/.env
     environment:
