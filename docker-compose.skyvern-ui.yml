@@ -5,8 +5,8 @@ services:
     image: public.ecr.aws/skyvern/skyvern-ui:latest
     restart: on-failure
     ports:
-      - 8080:8080           # UI
-      - 9090:9090           # Artifact API
+      - 8081:8080           # UI
+      - 9091:9090           # Artifact API
     volumes:
       - ./artifacts:/data/artifacts
       - ./videos:/data/videos
