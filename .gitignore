@@ -171,7 +171,7 @@ files/
 temp/
 
 # Streamlit ignores
-**/secrets*.toml
+# **/secrets*.toml
 
 ## Frontend
 node_modules
