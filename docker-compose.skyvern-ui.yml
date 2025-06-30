@@ -11,7 +11,7 @@ services:
       - ./artifacts:/data/artifacts
       - ./videos:/data/videos
       - ./har:/data/har
-      - ./.streamlit:/app/.streamlit
+      - /data/coolify/applications/ng8sgsk4cwc88c404gsoc08s/.streamlit:/app/.streamlit
     env_file:
       - skyvern-frontend/.env
     environment:
