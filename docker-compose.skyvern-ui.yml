@@ -1,0 +1,26 @@
+version: '3.9'
+
+services:
+  skyvern-ui:
+    image: public.ecr.aws/skyvern/skyvern-ui:latest
+    restart: on-failure
+    ports:
+      - 8080:8080           # UI
+      - 9090:9090           # Artifact API
+    volumes:
+      - ./artifacts:/data/artifacts
+      - ./videos:/data/videos
+      - ./har:/data/har
+      - ./.streamlit:/app/.streamlit
+    env_file:
+      - skyvern-frontend/.env
+    environment:
+      - VITE_ENABLE_CODE_BLOCK=true
+    depends_on:
+      skyvern:
+        condition: service_healthy
+
+networks:
+  default:
+    external: true
+    name: skyvern-net
