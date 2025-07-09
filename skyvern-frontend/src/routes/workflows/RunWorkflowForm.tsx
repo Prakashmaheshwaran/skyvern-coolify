@@ -29,14 +29,16 @@ import { WorkflowParameter } from "./types/workflowTypes";
 import { WorkflowParameterInput } from "./WorkflowParameterInput";
 import { AxiosError } from "axios";
 import { getLabelForWorkflowParameterType } from "./editor/workflowEditorUtils";
-import { MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT } from "./editor/nodes/Taskv2Node/types";
+import { MAX_SCREENSHOT_SCROLLS_DEFAULT } from "./editor/nodes/Taskv2Node/types";
+import { lsKeys } from "@/util/env";
+
 type Props = {
   workflowParameters: Array<WorkflowParameter>;
   initialValues: Record<string, unknown>;
   initialSettings: {
     proxyLocation: ProxyLocation;
     webhookCallbackUrl: string;
-    maxScreenshotScrollingTimes: number | null;
+    maxScreenshotScrolls: number | null;
     extraHttpHeaders: Record<string, string> | null;
   };
 };
@@ -77,7 +79,7 @@ type RunWorkflowRequestBody = {
   proxy_location: ProxyLocation | null;
   webhook_callback_url?: string | null;
   browser_session_id: string | null;
-  max_screenshot_scrolling_times?: number | null;
+  max_screenshot_scrolls?: number | null;
   extra_http_headers?: Record<string, string> | null;
 };
 
@@ -89,7 +91,7 @@ function getRunWorkflowRequestBody(
     webhookCallbackUrl,
     proxyLocation,
     browserSessionId,
-    maxScreenshotScrollingTimes,
+    maxScreenshotScrolls,
     extraHttpHeaders,
     ...parameters
   } = values;
@@ -107,8 +109,8 @@ function getRunWorkflowRequestBody(
     browser_session_id: bsi,
   };
 
-  if (maxScreenshotScrollingTimes) {
-    body.max_screenshot_scrolling_times = maxScreenshotScrollingTimes;
+  if (maxScreenshotScrolls) {
+    body.max_screenshot_scrolls = maxScreenshotScrolls;
   }
 
   if (webhookCallbackUrl) {
@@ -131,7 +133,7 @@ type RunWorkflowFormType = Record<string, unknown> & {
   webhookCallbackUrl: string;
   proxyLocation: ProxyLocation;
   browserSessionId: string | null;
-  maxScreenshotScrollingTimes: number | null;
+  maxScreenshotScrolls: number | null;
   extraHttpHeaders: string | null;
 };
 
@@ -145,7 +147,7 @@ function RunWorkflowForm({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const browserSessionIdDefault = useLocalStorageFormDefault(
-    "skyvern.browserSessionId",
+    lsKeys.browserSessionId,
     (initialValues.browserSessionId as string | undefined) ?? null,
   );
   const form = useForm<RunWorkflowFormType>({
@@ -154,7 +156,7 @@ function RunWorkflowForm({
       webhookCallbackUrl: initialSettings.webhookCallbackUrl,
       proxyLocation: initialSettings.proxyLocation,
       browserSessionId: browserSessionIdDefault,
-      maxScreenshotScrollingTimes: initialSettings.maxScreenshotScrollingTimes,
+      maxScreenshotScrolls: initialSettings.maxScreenshotScrolls,
       extraHttpHeaders: initialSettings.extraHttpHeaders
         ? JSON.stringify(initialSettings.extraHttpHeaders)
         : null,
@@ -162,11 +164,7 @@ function RunWorkflowForm({
   });
   const apiCredential = useApiCredential();
 
-  useSyncFormFieldToStorage(
-    form,
-    "browserSessionId",
-    "skyvern.browserSessionId",
-  );
+  useSyncFormFieldToStorage(form, "browserSessionId", lsKeys.browserSessionId);
 
   const runWorkflowMutation = useMutation({
     mutationFn: async (values: RunWorkflowFormType) => {
@@ -208,7 +206,7 @@ function RunWorkflowForm({
       webhookCallbackUrl,
       proxyLocation,
       browserSessionId,
-      maxScreenshotScrollingTimes,
+      maxScreenshotScrolls,
       extraHttpHeaders,
       ...parameters
     } = values;
@@ -222,7 +220,7 @@ function RunWorkflowForm({
       webhookCallbackUrl,
       proxyLocation,
       browserSessionId,
-      maxScreenshotScrollingTimes,
+      maxScreenshotScrolls,
       extraHttpHeaders,
     });
   }
@@ -462,9 +460,9 @@ function RunWorkflowForm({
             }}
           />
           <FormField
-            key="maxScreenshotScrollingTimes"
+            key="maxScreenshotScrolls"
             control={form.control}
-            name="maxScreenshotScrollingTimes"
+            name="maxScreenshotScrolls"
             render={({ field }) => {
               return (
                 <FormItem>
@@ -472,10 +470,10 @@ function RunWorkflowForm({
                     <FormLabel>
                       <div className="w-72">
                         <div className="flex items-center gap-2 text-lg">
-                          Max Scrolling Screenshots
+                          Max Screenshot Scrolls
                         </div>
                         <h2 className="text-sm text-slate-400">
-                          {`The maximum number of times to scroll down the page to take merged screenshots after action. Default is ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}. If it's set to 0, it will take the current viewport screenshot.`}
+                          {`The maximum number of scrolls for the post action screenshot. Default is ${MAX_SCREENSHOT_SCROLLS_DEFAULT}. If it's set to 0, it will take the current viewport screenshot.`}
                         </h2>
                       </div>
                     </FormLabel>
@@ -486,7 +484,7 @@ function RunWorkflowForm({
                           type="number"
                           min={0}
                           value={field.value ?? ""}
-                          placeholder={`Default: ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}`}
+                          placeholder={`Default: ${MAX_SCREENSHOT_SCROLLS_DEFAULT}`}
                           onChange={(event) => {
                             const value =
                               event.target.value === ""

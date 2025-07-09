@@ -7,7 +7,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ProxyLocation } from "@/api/types";
 import { useQuery } from "@tanstack/react-query";
 import { Label } from "@/components/ui/label";
@@ -20,10 +20,12 @@ import { Separator } from "@/components/ui/separator";
 import { ModelsResponse } from "@/api/types";
 import { ModelSelector } from "@/components/ModelSelector";
 import { WorkflowModel } from "@/routes/workflows/types/workflowTypes";
-import { MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT } from "../Taskv2Node/types";
+import { MAX_SCREENSHOT_SCROLLS_DEFAULT } from "../Taskv2Node/types";
 import { KeyValueInput } from "@/components/KeyValueInput";
+import { useWorkflowSettingsStore } from "@/store/WorkflowSettingsStore";
 
 function StartNode({ id, data }: NodeProps<StartNode>) {
+  const workflowSettingsStore = useWorkflowSettingsStore();
   const credentialGetter = useCredentialGetter();
   const { updateNodeData } = useReactFlow();
 
@@ -53,11 +55,16 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
       ? data.persistBrowserSession
       : false,
     model: data.withWorkflowSettings ? data.model : workflowModel,
-    maxScreenshotScrollingTimes: data.withWorkflowSettings
-      ? data.maxScreenshotScrollingTimes
+    maxScreenshotScrolls: data.withWorkflowSettings
+      ? data.maxScreenshotScrolls
       : null,
     extraHttpHeaders: data.withWorkflowSettings ? data.extraHttpHeaders : null,
   });
+
+  useEffect(() => {
+    workflowSettingsStore.setWorkflowSettings(inputs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputs]);
 
   function handleChange(key: string, value: unknown) {
     if (!data.editable) {
@@ -151,21 +158,21 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <Label>Max Scrolling Screenshots</Label>
+                        <Label>Max Screenshot Scrolls</Label>
                         <HelpTooltip
-                          content={`The maximum number of times to scroll down the page to take merged screenshots after action. Default is ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}. If it's set to 0, it will take the current viewport screenshot.`}
+                          content={`The maximum number of scrolls for the post action screenshot. Default is ${MAX_SCREENSHOT_SCROLLS_DEFAULT}. If it's set to 0, it will take the current viewport screenshot.`}
                         />
                       </div>
                       <Input
-                        value={inputs.maxScreenshotScrollingTimes ?? ""}
-                        placeholder={`Default: ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}`}
+                        value={inputs.maxScreenshotScrolls ?? ""}
+                        placeholder={`Default: ${MAX_SCREENSHOT_SCROLLS_DEFAULT}`}
                         onChange={(event) => {
                           const value =
                             event.target.value === ""
                               ? null
                               : Number(event.target.value);
 
-                          handleChange("maxScreenshotScrollingTimes", value);
+                          handleChange("maxScreenshotScrolls", value);
                         }}
                       />
                     </div>

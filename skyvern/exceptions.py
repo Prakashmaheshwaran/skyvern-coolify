@@ -128,6 +128,11 @@ class UnknownBlockType(SkyvernException):
         super().__init__(f"Unknown block type {block_type}")
 
 
+class BlockNotFound(SkyvernException):
+    def __init__(self, block_label: str) -> None:
+        super().__init__(f"Block {block_label} not found")
+
+
 class WorkflowNotFound(SkyvernHTTPException):
     def __init__(
         self,
@@ -463,6 +468,11 @@ class FailToSelectByIndex(SkyvernException):
         super().__init__(f"Failed to select by index. element_id={element_id}")
 
 
+class EmptyDomOrHtmlTree(SkyvernException):
+    def __init__(self) -> None:
+        super().__init__("Empty dom or html tree")
+
+
 class OptionIndexOutOfBound(SkyvernException):
     def __init__(self, element_id: str):
         super().__init__(f"Option index is out of bound. element_id={element_id}")
@@ -710,3 +720,16 @@ class MissingBrowserSessionError(SkyvernHTTPException):
 class MissingBrowserAddressError(SkyvernException):
     def __init__(self, browser_session_id: str) -> None:
         super().__init__(f"Browser session {browser_session_id} does not have an address.")
+
+
+class BrowserSessionNotFound(SkyvernHTTPException):
+    def __init__(self, browser_session_id: str) -> None:
+        super().__init__(
+            f"Browser session {browser_session_id} does not exist or is not live.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class APIKeyNotFound(SkyvernHTTPException):
+    def __init__(self, organization_id: str) -> None:
+        super().__init__(f"No valid API key token found for organization {organization_id}")

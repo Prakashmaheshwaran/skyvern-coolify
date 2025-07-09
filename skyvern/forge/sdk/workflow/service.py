@@ -10,6 +10,8 @@ from skyvern import analytics
 from skyvern.config import settings
 from skyvern.constants import GET_DOWNLOADED_FILES_TIMEOUT, SAVE_DOWNLOADED_FILES_TIMEOUT
 from skyvern.exceptions import (
+    BlockNotFound,
+    BrowserSessionNotFound,
     FailedToSendWebhook,
     InvalidCredentialId,
     MissingValueForParameter,
@@ -28,6 +30,7 @@ from skyvern.forge.sdk.schemas.files import FileInfo
 from skyvern.forge.sdk.schemas.organizations import Organization
 from skyvern.forge.sdk.schemas.tasks import Task
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunBlock, WorkflowRunTimeline, WorkflowRunTimelineType
+from skyvern.forge.sdk.trace import TraceManager
 from skyvern.forge.sdk.workflow.exceptions import (
     ContextParameterSourceNotDefined,
     InvalidWaitBlockTime,
@@ -48,6 +51,7 @@ from skyvern.forge.sdk.workflow.models.block import (
     FileParserBlock,
     FileUploadBlock,
     ForLoopBlock,
+    HttpRequestBlock,
     LoginBlock,
     NavigationBlock,
     PDFParserBlock,
@@ -175,7 +179,7 @@ class WorkflowService:
             organization_id=workflow.organization_id,
             proxy_location=workflow_request.proxy_location,
             webhook_callback_url=workflow_request.webhook_callback_url,
-            max_screenshot_scrolling_times=workflow_request.max_screenshot_scrolling_times,
+            max_screenshot_scrolling_times=workflow_request.max_screenshot_scrolls,
         )
         context: skyvern_context.SkyvernContext | None = skyvern_context.current()
         current_run_id = context.run_id if context and context.run_id else workflow_run.workflow_run_id
@@ -189,7 +193,7 @@ class WorkflowService:
                 run_id=current_run_id,
                 workflow_permanent_id=workflow_run.workflow_permanent_id,
                 max_steps_override=max_steps_override,
-                max_screenshot_scrolling_times=workflow_request.max_screenshot_scrolling_times,
+                max_screenshot_scrolls=workflow_request.max_screenshot_scrolls,
             )
         )
 
@@ -245,11 +249,13 @@ class WorkflowService:
 
         return workflow_run
 
+    @TraceManager.traced_async(ignore_inputs=["organization", "api_key"])
     async def execute_workflow(
         self,
         workflow_run_id: str,
         api_key: str,
         organization: Organization,
+        block_labels: list[str] | None = None,
         browser_session_id: str | None = None,
     ) -> WorkflowRun:
         """Execute a workflow."""
@@ -324,8 +330,32 @@ class WorkflowService:
             )
             return workflow_run
 
+        all_blocks = workflow.workflow_definition.blocks
+
+        if block_labels and len(block_labels):
+            blocks: list[BlockTypeVar] = []
+            all_labels = {block.label: block for block in all_blocks}
+
+            for label in block_labels:
+                if label not in all_labels:
+                    raise BlockNotFound(block_label=label)
+
+                blocks.append(all_labels[label])
+
+            LOG.info(
+                "Executing workflow blocks via whitelist",
+                workflow_run_id=workflow_run.workflow_run_id,
+                block_cnt=len(blocks),
+                block_labels=block_labels,
+            )
+
+        else:
+            blocks = all_blocks
+
+        if not blocks:
+            raise SkyvernException(f"No blocks found for the given block labels: {block_labels}")
+
         # Execute workflow blocks
-        blocks = workflow.workflow_definition.blocks
         blocks_cnt = len(blocks)
         block_result = None
         for block_idx, block in enumerate(blocks):
@@ -778,16 +808,26 @@ class WorkflowService:
         organization_id: str,
         parent_workflow_run_id: str | None = None,
     ) -> WorkflowRun:
+        # validate the browser session id
+        if workflow_request.browser_session_id:
+            browser_session = await app.DATABASE.get_persistent_browser_session(
+                session_id=workflow_request.browser_session_id,
+                organization_id=organization_id,
+            )
+            if not browser_session:
+                raise BrowserSessionNotFound(browser_session_id=workflow_request.browser_session_id)
+
         return await app.DATABASE.create_workflow_run(
             workflow_permanent_id=workflow_permanent_id,
             workflow_id=workflow_id,
             organization_id=organization_id,
+            browser_session_id=workflow_request.browser_session_id,
             proxy_location=workflow_request.proxy_location,
             webhook_callback_url=workflow_request.webhook_callback_url,
             totp_verification_url=workflow_request.totp_verification_url,
             totp_identifier=workflow_request.totp_identifier,
             parent_workflow_run_id=parent_workflow_run_id,
-            max_screenshot_scrolling_times=workflow_request.max_screenshot_scrolling_times,
+            max_screenshot_scrolling_times=workflow_request.max_screenshot_scrolls,
             extra_http_headers=workflow_request.extra_http_headers,
         )
 
@@ -1203,7 +1243,7 @@ class WorkflowService:
             total_steps=total_steps,
             total_cost=total_cost,
             workflow_title=workflow.title,
-            max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
+            max_screenshot_scrolls=workflow_run.max_screenshot_scrolls,
         )
 
     async def clean_up_workflow(
@@ -1477,7 +1517,7 @@ class WorkflowService:
                     totp_identifier=request.totp_identifier,
                     persist_browser_session=request.persist_browser_session,
                     model=request.model,
-                    max_screenshot_scrolling_times=request.max_screenshot_scrolling_times,
+                    max_screenshot_scrolling_times=request.max_screenshot_scrolls,
                     extra_http_headers=request.extra_http_headers,
                     workflow_permanent_id=workflow_permanent_id,
                     version=existing_version + 1,
@@ -1496,7 +1536,7 @@ class WorkflowService:
                     totp_identifier=request.totp_identifier,
                     persist_browser_session=request.persist_browser_session,
                     model=request.model,
-                    max_screenshot_scrolling_times=request.max_screenshot_scrolling_times,
+                    max_screenshot_scrolling_times=request.max_screenshot_scrolls,
                     extra_http_headers=request.extra_http_headers,
                     is_saved_task=request.is_saved_task,
                     status=request.status,
@@ -2064,6 +2104,24 @@ class WorkflowService:
                 model=block_yaml.model,
                 output_parameter=output_parameter,
             )
+        elif block_yaml.block_type == BlockType.HTTP_REQUEST:
+            http_request_block_parameters = (
+                [parameters[parameter_key] for parameter_key in block_yaml.parameter_keys]
+                if block_yaml.parameter_keys
+                else []
+            )
+            return HttpRequestBlock(
+                label=block_yaml.label,
+                method=block_yaml.method,
+                url=block_yaml.url,
+                headers=block_yaml.headers,
+                body=block_yaml.body,
+                timeout=block_yaml.timeout,
+                follow_redirects=block_yaml.follow_redirects,
+                parameters=http_request_block_parameters,
+                output_parameter=output_parameter,
+                continue_on_failure=block_yaml.continue_on_failure,
+            )
         elif block_yaml.block_type == BlockType.GOTO_URL:
             return UrlBlock(
                 label=block_yaml.label,
@@ -2095,7 +2153,7 @@ class WorkflowService:
             ),
             proxy_location=proxy_location,
             status=status,
-            max_screenshot_scrolling_times=max_screenshot_scrolling_times,
+            max_screenshot_scrolls=max_screenshot_scrolling_times,
             extra_http_headers=extra_http_headers,
         )
         return await app.WORKFLOW_SERVICE.create_workflow_from_request(

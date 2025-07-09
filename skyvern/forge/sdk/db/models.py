@@ -61,6 +61,7 @@ class TaskModel(Base):
 
     task_id = Column(String, primary_key=True, default=generate_task_id)
     organization_id = Column(String, ForeignKey("organizations.organization_id"))
+    browser_session_id = Column(String, nullable=True, index=True)
     status = Column(String, index=True)
     webhook_callback_url = Column(String)
     totp_verification_url = Column(String)
@@ -256,6 +257,7 @@ class WorkflowRunModel(Base):
     # workfow runs with parent_workflow_run_id are nested workflow runs which won't show up in the workflow run history
     parent_workflow_run_id = Column(String, nullable=True, index=True)
     organization_id = Column(String, nullable=False, index=True)
+    browser_session_id = Column(String, nullable=True, index=True)
     status = Column(String, nullable=False)
     failure_reason = Column(String)
     proxy_location = Column(String)
@@ -606,6 +608,15 @@ class WorkflowRunBlockModel(Base):
     # wait block
     wait_sec = Column(Integer, nullable=True)
 
+    # http request block
+    http_request_method = Column(String(10), nullable=True)
+    http_request_url = Column(String, nullable=True)
+    http_request_headers = Column(JSON, nullable=True)
+    http_request_body = Column(JSON, nullable=True)
+    http_request_parameters = Column(JSON, nullable=True)
+    http_request_timeout = Column(Integer, nullable=True)
+    http_request_follow_redirects = Column(Boolean, nullable=True)
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
 
@@ -621,6 +632,7 @@ class TaskV2Model(Base):
     workflow_run_id = Column(String, nullable=True)
     workflow_id = Column(String, nullable=True)
     workflow_permanent_id = Column(String, nullable=True)
+    browser_session_id = Column(String, nullable=True, index=True)
     prompt = Column(UnicodeText, nullable=True)
     url = Column(String, nullable=True)
     summary = Column(String, nullable=True)

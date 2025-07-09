@@ -1,3 +1,4 @@
+import asyncio
 from enum import Enum
 from typing import Annotated, Any
 
@@ -15,6 +16,7 @@ from skyvern.forge.prompts import prompt_engine
 from skyvern.forge.sdk.api.llm.exceptions import LLMProviderError
 from skyvern.forge.sdk.artifact.models import Artifact, ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
+from skyvern.forge.sdk.core.curl_converter import curl_to_http_request_block_params
 from skyvern.forge.sdk.core.permissions.permission_checker_factory import PermissionCheckerFactory
 from skyvern.forge.sdk.core.security import generate_skyvern_signature
 from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
@@ -75,6 +77,8 @@ from skyvern.forge.sdk.workflow.models.yaml import WorkflowCreateYAMLRequest
 from skyvern.schemas.artifacts import EntityType, entity_type_to_param
 from skyvern.schemas.runs import (
     CUA_ENGINES,
+    BlockRunRequest,
+    BlockRunResponse,
     RunEngine,
     RunResponse,
     RunType,
@@ -84,7 +88,7 @@ from skyvern.schemas.runs import (
     WorkflowRunResponse,
 )
 from skyvern.schemas.workflows import WorkflowRequest
-from skyvern.services import run_service, task_v1_service, task_v2_service, workflow_service
+from skyvern.services import block_service, run_service, task_v1_service, task_v2_service, workflow_service
 from skyvern.webeye.actions.actions import Action
 
 LOG = structlog.get_logger()
@@ -166,7 +170,7 @@ async def run_task(
             totp_identifier=run_request.totp_identifier,
             include_action_history_in_verification=run_request.include_action_history_in_verification,
             model=run_request.model,
-            max_screenshot_scrolling_times=run_request.max_screenshot_scrolling_times,
+            max_screenshot_scrolls=run_request.max_screenshot_scrolls,
             extra_http_headers=run_request.extra_http_headers,
         )
         task_v1_response = await task_v1_service.run_task(
@@ -205,7 +209,7 @@ async def run_task(
                 data_extraction_schema=task_v1_response.extracted_information_schema,
                 error_code_mapping=task_v1_response.error_code_mapping,
                 browser_session_id=run_request.browser_session_id,
-                max_screenshot_scrolling_times=run_request.max_screenshot_scrolling_times,
+                max_screenshot_scrolls=run_request.max_screenshot_scrolls,
             ),
         )
     if run_request.engine == RunEngine.skyvern_v2:
@@ -224,7 +228,7 @@ async def run_task(
                 error_code_mapping=run_request.error_code_mapping,
                 create_task_run=True,
                 model=run_request.model,
-                max_screenshot_scrolling_times=run_request.max_screenshot_scrolling_times,
+                max_screenshot_scrolling_times=run_request.max_screenshot_scrolls,
                 extra_http_headers=run_request.extra_http_headers,
             )
         except MissingBrowserAddressError as e:
@@ -268,7 +272,7 @@ async def run_task(
                 error_code_mapping=task_v2.error_code_mapping,
                 data_extraction_schema=task_v2.extracted_information_schema,
                 publish_workflow=run_request.publish_workflow,
-                max_screenshot_scrolling_times=run_request.max_screenshot_scrolling_times,
+                max_screenshot_scrolls=run_request.max_screenshot_scrolls,
             ),
         )
     LOG.error("Invalid agent engine", engine=run_request.engine, organization_id=current_org.organization_id)
@@ -324,7 +328,7 @@ async def run_workflow(
         totp_identifier=workflow_run_request.totp_identifier,
         totp_verification_url=workflow_run_request.totp_url,
         browser_session_id=workflow_run_request.browser_session_id,
-        max_screenshot_scrolling_times=workflow_run_request.max_screenshot_scrolling_times,
+        max_screenshot_scrolls=workflow_run_request.max_screenshot_scrolls,
         extra_http_headers=workflow_run_request.extra_http_headers,
     )
 
@@ -682,6 +686,60 @@ async def delete_workflow(
     await app.WORKFLOW_SERVICE.delete_workflow_by_permanent_id(workflow_id, current_org.organization_id)
 
 
+@legacy_base_router.post(
+    "/utilities/curl-to-http",
+    tags=["Utilities"],
+    openapi_extra={
+        "x-fern-sdk-group-name": "utilities",
+        "x-fern-sdk-method-name": "convert_curl_to_http",
+    },
+    description="Convert a curl command to HTTP request parameters",
+    summary="Convert curl to HTTP parameters",
+    responses={
+        200: {"description": "Successfully converted curl command"},
+        400: {"description": "Invalid curl command"},
+    },
+)
+@legacy_base_router.post("/utilities/curl-to-http/", include_in_schema=False)
+async def convert_curl_to_http(
+    request: dict[str, str],
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+) -> dict[str, Any]:
+    """
+    Convert a curl command to HTTP request parameters.
+
+    This endpoint is useful for converting curl commands to the format
+    needed by the HTTP Request workflow block.
+
+    Request body should contain:
+    - curl_command: The curl command string to convert
+
+    Returns:
+    - method: HTTP method
+    - url: The URL
+    - headers: Dict of headers
+    - body: Request body as dict
+    - timeout: Default timeout
+    - follow_redirects: Default follow redirects setting
+    """
+    curl_command = request.get("curl_command")
+    if not curl_command:
+        raise HTTPException(status_code=400, detail="curl_command is required in the request body")
+
+    try:
+        result = curl_to_http_request_block_params(curl_command)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        LOG.error(
+            "Failed to convert curl command",
+            error=str(e),
+            organization_id=current_org.organization_id,
+        )
+        raise HTTPException(status_code=400, detail=f"Failed to convert curl command: {str(e)}")
+
+
 @base_router.get(
     "/artifacts/{artifact_id}",
     tags=["Artifacts"],
@@ -793,6 +851,57 @@ async def retry_run_webhook(
 ) -> None:
     analytics.capture("skyvern-oss-agent-run-retry-webhook")
     await run_service.retry_run_webhook(run_id, organization_id=current_org.organization_id, api_key=x_api_key)
+
+
+@base_router.post(
+    "/run/workflows/blocks",
+    include_in_schema=False,
+    response_model=BlockRunResponse,
+)
+async def run_block(
+    block_run_request: BlockRunRequest,
+    organization: Organization = Depends(org_auth_service.get_current_org),
+    template: bool = Query(False),
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> BlockRunResponse:
+    """
+    Kick off the execution of one or more blocks in a workflow. Returns the
+    workflow_run_id.
+    """
+
+    workflow_run = await block_service.ensure_workflow_run(
+        organization=organization,
+        template=template,
+        workflow_permanent_id=block_run_request.workflow_id,
+        workflow_run_request=block_run_request,
+    )
+
+    browser_session_id = block_run_request.browser_session_id
+
+    asyncio.create_task(
+        block_service.execute_blocks(
+            api_key=x_api_key or "",
+            block_labels=block_run_request.block_labels,
+            workflow_run_id=workflow_run.workflow_run_id,
+            organization=organization,
+            browser_session_id=browser_session_id,
+        )
+    )
+
+    return BlockRunResponse(
+        block_labels=block_run_request.block_labels,
+        run_id=workflow_run.workflow_run_id,
+        run_type=RunType.workflow_run,
+        status=str(workflow_run.status),
+        output=None,
+        failure_reason=workflow_run.failure_reason,
+        created_at=workflow_run.created_at,
+        modified_at=workflow_run.modified_at,
+        run_request=block_run_request,
+        downloaded_files=None,
+        recording_url=None,
+        app_url=f"{settings.SKYVERN_APP_URL.rstrip('/')}/workflows/{workflow_run.workflow_permanent_id}/{workflow_run.workflow_run_id}",
+    )
 
 
 ################# Legacy Endpoints #################
@@ -959,6 +1068,37 @@ async def cancel_task(
     await app.agent.execute_task_webhook(task=task, last_step=latest_step, api_key=x_api_key)
 
 
+async def _cancel_workflow_run(workflow_run_id: str, organization_id: str, x_api_key: str | None = None) -> None:
+    workflow_run = await app.DATABASE.get_workflow_run(
+        workflow_run_id=workflow_run_id,
+        organization_id=organization_id,
+    )
+
+    if not workflow_run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow run not found {workflow_run_id}",
+        )
+
+    # get all the child workflow runs and cancel them
+    child_workflow_runs = await app.DATABASE.get_workflow_runs_by_parent_workflow_run_id(
+        parent_workflow_run_id=workflow_run_id,
+        organization_id=organization_id,
+    )
+
+    for child_workflow_run in child_workflow_runs:
+        if child_workflow_run.status not in [
+            WorkflowRunStatus.running,
+            WorkflowRunStatus.created,
+            WorkflowRunStatus.queued,
+        ]:
+            continue
+        await app.WORKFLOW_SERVICE.mark_workflow_run_as_canceled(child_workflow_run.workflow_run_id)
+
+    await app.WORKFLOW_SERVICE.mark_workflow_run_as_canceled(workflow_run_id)
+    await app.WORKFLOW_SERVICE.execute_workflow_webhook(workflow_run, api_key=x_api_key)
+
+
 @legacy_base_router.post(
     "/workflows/runs/{workflow_run_id}/cancel",
     tags=["agent"],
@@ -973,30 +1113,27 @@ async def cancel_workflow_run(
     current_org: Organization = Depends(org_auth_service.get_current_org),
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> None:
-    workflow_run = await app.DATABASE.get_workflow_run(
-        workflow_run_id=workflow_run_id,
-        organization_id=current_org.organization_id,
-    )
-    if not workflow_run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workflow run not found {workflow_run_id}",
-        )
-    # get all the child workflow runs and cancel them
-    child_workflow_runs = await app.DATABASE.get_workflow_runs_by_parent_workflow_run_id(
-        parent_workflow_run_id=workflow_run_id,
-        organization_id=current_org.organization_id,
-    )
-    for child_workflow_run in child_workflow_runs:
-        if child_workflow_run.status not in [
-            WorkflowRunStatus.running,
-            WorkflowRunStatus.created,
-            WorkflowRunStatus.queued,
-        ]:
-            continue
-        await app.WORKFLOW_SERVICE.mark_workflow_run_as_canceled(child_workflow_run.workflow_run_id)
-    await app.WORKFLOW_SERVICE.mark_workflow_run_as_canceled(workflow_run_id)
-    await app.WORKFLOW_SERVICE.execute_workflow_webhook(workflow_run, api_key=x_api_key)
+    await _cancel_workflow_run(workflow_run_id, current_org.organization_id, x_api_key)
+
+
+@legacy_base_router.post(
+    "/runs/{browser_session_id}/workflow_run/{workflow_run_id}/cancel/",
+    tags=["agent"],
+    openapi_extra={
+        "x-fern-sdk-group-name": "agent",
+        "x-fern-sdk-method-name": "cancel_workflow_run",
+    },
+)
+@legacy_base_router.post("/runs/{browser_session_id}/workflow_run/{workflow_run_id}/cancel/", include_in_schema=False)
+async def cancel_persistent_browser_session_workflow_run(
+    workflow_run_id: str,
+    browser_session_id: str,
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> None:
+    await app.PERSISTENT_SESSIONS_MANAGER.release_browser_session(browser_session_id, current_org.organization_id)
+
+    await _cancel_workflow_run(workflow_run_id, current_org.organization_id, x_api_key)
 
 
 @legacy_base_router.post(
@@ -1823,7 +1960,7 @@ async def run_task_v2(
             create_task_run=True,
             extracted_information_schema=data.extracted_information_schema,
             error_code_mapping=data.error_code_mapping,
-            max_screenshot_scrolling_times=data.max_screenshot_scrolling_times,
+            max_screenshot_scrolling_times=data.max_screenshot_scrolls,
             browser_session_id=data.browser_session_id,
             extra_http_headers=data.extra_http_headers,
         )

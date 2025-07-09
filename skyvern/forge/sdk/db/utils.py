@@ -143,7 +143,8 @@ def convert_to_task(task_obj: TaskModel, debug_enabled: bool = False, workflow_p
         queued_at=task_obj.queued_at,
         started_at=task_obj.started_at,
         finished_at=task_obj.finished_at,
-        max_screenshot_scrolling_times=task_obj.max_screenshot_scrolling_times,
+        max_screenshot_scrolls=task_obj.max_screenshot_scrolling_times,
+        browser_session_id=task_obj.browser_session_id,
     )
     return task
 
@@ -240,7 +241,7 @@ def convert_to_workflow(workflow_model: WorkflowModel, debug_enabled: bool = Fal
         persist_browser_session=workflow_model.persist_browser_session,
         model=workflow_model.model,
         proxy_location=(ProxyLocation(workflow_model.proxy_location) if workflow_model.proxy_location else None),
-        max_screenshot_scrolling_times=workflow_model.max_screenshot_scrolling_times,
+        max_screenshot_scrolls=workflow_model.max_screenshot_scrolling_times,
         version=workflow_model.version,
         is_saved_task=workflow_model.is_saved_task,
         description=workflow_model.description,
@@ -268,6 +269,7 @@ def convert_to_workflow_run(
         parent_workflow_run_id=workflow_run_model.parent_workflow_run_id,
         workflow_id=workflow_run_model.workflow_id,
         organization_id=workflow_run_model.organization_id,
+        browser_session_id=workflow_run_model.browser_session_id,
         status=WorkflowRunStatus[workflow_run_model.status],
         failure_reason=workflow_run_model.failure_reason,
         proxy_location=(
@@ -282,7 +284,7 @@ def convert_to_workflow_run(
         created_at=workflow_run_model.created_at,
         modified_at=workflow_run_model.modified_at,
         workflow_title=workflow_title,
-        max_screenshot_scrolling_times=workflow_run_model.max_screenshot_scrolling_times,
+        max_screenshot_scrolls=workflow_run_model.max_screenshot_scrolling_times,
         extra_http_headers=workflow_run_model.extra_http_headers,
     )
 

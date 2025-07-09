@@ -30,6 +30,7 @@ from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
 from skyvern.forge.sdk.schemas.organizations import Organization
 from skyvern.forge.sdk.schemas.task_v2 import TaskV2, TaskV2Metadata, TaskV2Status, ThoughtScenario, ThoughtType
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunTimeline, WorkflowRunTimelineType
+from skyvern.forge.sdk.trace import TraceManager
 from skyvern.forge.sdk.workflow.models.block import (
     BlockResult,
     BlockStatus,
@@ -187,7 +188,7 @@ async def initialize_task_v2(
     if context:
         context.task_v2_id = task_v2.observer_cruise_id
         context.run_id = context.run_id or task_v2.observer_cruise_id
-        context.max_screenshot_scrolling_times = max_screenshot_scrolling_times
+        context.max_screenshot_scrolls = max_screenshot_scrolling_times
 
     thought = await app.DATABASE.create_thought(
         task_v2_id=task_v2.observer_cruise_id,
@@ -231,7 +232,7 @@ async def initialize_task_v2(
         workflow_run = await app.WORKFLOW_SERVICE.setup_workflow_run(
             request_id=None,
             workflow_request=WorkflowRequestBody(
-                max_screenshot_scrolling_times=max_screenshot_scrolling_times,
+                max_screenshot_scrolls=max_screenshot_scrolling_times,
                 browser_session_id=browser_session_id,
                 extra_http_headers=extra_http_headers,
             ),
@@ -298,6 +299,7 @@ async def initialize_task_v2(
     return task_v2
 
 
+@TraceManager.traced_async(ignore_inputs=["organization"])
 async def run_task_v2(
     organization: Organization,
     task_v2_id: str,
@@ -470,7 +472,7 @@ async def run_task_v2_helper(
             task_v2_id=task_v2_id,
             run_id=current_run_id,
             browser_session_id=browser_session_id,
-            max_screenshot_scrolling_times=task_v2.max_screenshot_scrolling_times,
+            max_screenshot_scrolls=task_v2.max_screenshot_scrolls,
         )
     )
 
@@ -788,7 +790,7 @@ async def run_task_v2_helper(
             proxy_location=task_v2.proxy_location or ProxyLocation.RESIDENTIAL,
             workflow_definition=workflow_definition_yaml,
             status=workflow.status,
-            max_screenshot_scrolling_times=task_v2.max_screenshot_scrolling_times,
+            max_screenshot_scrolls=task_v2.max_screenshot_scrolls,
         )
         LOG.info("Creating workflow from request", workflow_create_request=workflow_create_request)
         workflow = await app.WORKFLOW_SERVICE.create_workflow_from_request(
@@ -1251,7 +1253,7 @@ async def _generate_extraction_task(
     # extract the data
     context = skyvern_context.ensure_context()
     generate_extraction_task_prompt = load_prompt_with_elements(
-        scraped_page=scraped_page,
+        element_tree_builder=scraped_page,
         prompt_engine=prompt_engine,
         template_name="task_v2_generate_extraction_task",
         current_url=current_url,
@@ -1614,7 +1616,7 @@ async def _summarize_task_v2(
 
 async def build_task_v2_run_response(task_v2: TaskV2) -> TaskRunResponse:
     """Build TaskRunResponse object for webhook backward compatibility."""
-    from skyvern.services import workflow_service
+    from skyvern.services import workflow_service  # noqa: PLC0415
 
     workflow_run_resp = None
     if task_v2.workflow_run_id:

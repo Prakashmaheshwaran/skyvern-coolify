@@ -19,7 +19,7 @@ from skyvern import analytics
 from skyvern.config import settings
 from skyvern.constants import (
     BROWSER_DOWNLOADING_SUFFIX,
-    DEFAULT_MAX_SCREENSHOT_SCROLLING_TIMES,
+    DEFAULT_MAX_SCREENSHOT_SCROLLS,
     GET_DOWNLOADED_FILES_TIMEOUT,
     SAVE_DOWNLOADED_FILES_TIMEOUT,
     SCRAPE_TYPE_ORDER,
@@ -27,6 +27,7 @@ from skyvern.constants import (
     ScrapeType,
 )
 from skyvern.exceptions import (
+    BrowserSessionNotFound,
     BrowserStateMissingPage,
     DownloadFileMaxWaitingTime,
     EmptyScrapePage,
@@ -70,6 +71,7 @@ from skyvern.forge.sdk.models import Step, StepStatus
 from skyvern.forge.sdk.schemas.files import FileInfo
 from skyvern.forge.sdk.schemas.organizations import Organization
 from skyvern.forge.sdk.schemas.tasks import Task, TaskRequest, TaskResponse, TaskStatus
+from skyvern.forge.sdk.trace import TraceManager
 from skyvern.forge.sdk.workflow.context_manager import WorkflowRunContext
 from skyvern.forge.sdk.workflow.models.block import ActionBlock, BaseTaskBlock, ValidationBlock
 from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
@@ -183,7 +185,7 @@ class ForgeAgent:
             error_code_mapping=task_block.error_code_mapping,
             include_action_history_in_verification=task_block.include_action_history_in_verification,
             model=task_block.model,
-            max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
+            max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolls,
             extra_http_headers=workflow_run.extra_http_headers,
         )
         LOG.info(
@@ -223,6 +225,15 @@ class ForgeAgent:
     async def create_task(self, task_request: TaskRequest, organization_id: str) -> Task:
         webhook_callback_url = str(task_request.webhook_callback_url) if task_request.webhook_callback_url else None
         totp_verification_url = str(task_request.totp_verification_url) if task_request.totp_verification_url else None
+        # validate browser session id
+        if task_request.browser_session_id:
+            browser_session = await app.DATABASE.get_persistent_browser_session(
+                session_id=task_request.browser_session_id,
+                organization_id=organization_id,
+            )
+            if not browser_session:
+                raise BrowserSessionNotFound(browser_session_id=task_request.browser_session_id)
+
         task = await app.DATABASE.create_task(
             url=str(task_request.url),
             title=task_request.title,
@@ -241,8 +252,9 @@ class ForgeAgent:
             application=task_request.application,
             include_action_history_in_verification=task_request.include_action_history_in_verification,
             model=task_request.model,
-            max_screenshot_scrolling_times=task_request.max_screenshot_scrolling_times,
+            max_screenshot_scrolling_times=task_request.max_screenshot_scrolls,
             extra_http_headers=task_request.extra_http_headers,
+            browser_session_id=task_request.browser_session_id,
         )
         LOG.info(
             "Created new task",
@@ -257,6 +269,9 @@ class ForgeAgent:
         operations = await app.AGENT_FUNCTION.generate_async_operations(organization, task, page)
         self.async_operation_pool.add_operations(task.task_id, operations)
 
+    @TraceManager.traced_async(
+        ignore_inputs=["api_key", "close_browser_on_completion", "task_block", "cua_response", "llm_caller"]
+    )
     async def execute_step(
         self,
         organization: Organization,
@@ -417,8 +432,9 @@ class ForgeAgent:
                 if not llm_caller:
                     # create a new UI-TARS llm_caller
                     llm_key = task.llm_key or settings.VOLCENGINE_CUA_LLM_KEY
-                    llm_caller = UITarsLLMCaller(llm_key=llm_key, screenshot_scaling_enabled=True)
-                    llm_caller.initialize_conversation(task)
+                    ui_tars_llm_caller = UITarsLLMCaller(llm_key=llm_key, screenshot_scaling_enabled=True)
+                    ui_tars_llm_caller.initialize_conversation(task)
+                    llm_caller = ui_tars_llm_caller
 
             # TODO: remove the code after migrating everything to llm callers
             # currently, only anthropic cua and ui_tars tasks use llm_caller
@@ -818,6 +834,9 @@ class ForgeAgent:
             )
             return True
 
+    @TraceManager.traced_async(
+        ignore_inputs=["browser_state", "organization", "task_block", "cua_response", "llm_caller"]
+    )
     async def agent_step(
         self,
         task: Task,
@@ -1373,7 +1392,7 @@ class ForgeAgent:
                 reasoning = reasonings[0].summary[0].text if reasonings and reasonings[0].summary else None
                 assistant_message = assistant_messages[0].content[0].text if assistant_messages else None
                 skyvern_repsonse_prompt = load_prompt_with_elements(
-                    scraped_page=scraped_page,
+                    element_tree_builder=scraped_page,
                     prompt_engine=prompt_engine,
                     template_name="cua-answer-question",
                     navigation_goal=task.navigation_goal,
@@ -1597,7 +1616,7 @@ class ForgeAgent:
             actions_and_results_str = await self._get_action_results(task, current_step=step)
 
         verification_prompt = load_prompt_with_elements(
-            scraped_page=scraped_page_refreshed,
+            element_tree_builder=scraped_page_refreshed,
             prompt_engine=prompt_engine,
             template_name="check-user-goal",
             navigation_goal=task.navigation_goal,
@@ -1662,9 +1681,9 @@ class ForgeAgent:
             raise BrowserStateMissingPage()
 
         context = skyvern_context.ensure_context()
-        scrolling_number = context.max_screenshot_scrolling_times
+        scrolling_number = context.max_screenshot_scrolls
         if scrolling_number is None:
-            scrolling_number = DEFAULT_MAX_SCREENSHOT_SCROLLING_TIMES
+            scrolling_number = DEFAULT_MAX_SCREENSHOT_SCROLLS
 
         if engine in CUA_ENGINES:
             scrolling_number = 0
@@ -1974,7 +1993,7 @@ class ForgeAgent:
 
         context = skyvern_context.ensure_context()
         return load_prompt_with_elements(
-            scraped_page=scraped_page,
+            element_tree_builder=scraped_page,
             prompt_engine=prompt_engine,
             template_name=template,
             navigation_goal=navigation_goal,
