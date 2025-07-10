@@ -621,24 +621,14 @@ async def _create_cdp_connection_browser(
     if is_tunnel:
         LOG.info("Detected tunnel URL, using WebSocket proxy approach", tunnel_host=parsed_remote_url.netloc)
         
-        # First, check if the tunnel endpoint is reachable
+        # For tunnel URLs, always use the proxy approach since WebSocket rewriting is likely needed
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{remote_browser_url.rstrip('/')}/json/version", timeout=10)
-                response.raise_for_status()
-                version_info = response.json()
-                websocket_url = version_info.get("webSocketDebuggerUrl", "")
-                
-                LOG.info("Browser info retrieved from tunnel", websocket_url=websocket_url)
-                
-                # Check if WebSocket URL contains localhost (indicating rewriting is needed)
-                if websocket_url and "localhost" in websocket_url:
-                    LOG.info("WebSocket URL contains localhost, will use proxy approach")
-                    return await _create_cdp_tunnel_connection(playwright, remote_browser_url, extra_http_headers)
-                    
-        except httpx.RequestError as e:
-            LOG.error("Failed to connect to tunnel endpoint", error=str(e))
-            raise Exception(f"Failed to connect to tunnel at {remote_browser_url}: {e}") from e
+            LOG.info("Using tunnel proxy for CDP connection", remote_url=remote_browser_url)
+            return await _create_cdp_tunnel_connection(playwright, remote_browser_url, extra_http_headers)
+        except Exception as e:
+            LOG.error("Failed to create tunnel connection", error=str(e))
+            # Fall back to direct connection with enhanced error handling
+            pass
     
     # Standard connection (local or tunnel that doesn't need rewriting)
     browser_args = BrowserContextFactory.build_browser_args(extra_http_headers=extra_http_headers)
