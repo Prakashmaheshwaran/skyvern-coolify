@@ -15,6 +15,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
+import json
+import httpx
+import websockets
+import threading
+from contextlib import asynccontextmanager
 
 import aiofiles
 import psutil
@@ -576,9 +581,349 @@ async def _create_cdp_connection_browser(
     return browser_context, browser_artifacts, None
 
 
+class WebSocketTunnelProxy:
+    """
+    A WebSocket proxy that rewrites localhost URLs to tunnel URLs for CDP connections.
+    """
+    
+    def __init__(self, tunnel_host: str, tunnel_scheme: str = "wss", remote_browser_url: str = ""):
+        self.tunnel_host = tunnel_host
+        self.tunnel_scheme = tunnel_scheme
+        self.remote_browser_url = remote_browser_url
+        self.proxy_port = None
+        self.proxy_server = None
+        self.http_server = None
+        self.running = False
+        
+    async def start_proxy(self) -> int:
+        """Start the WebSocket proxy server and return the port."""
+        # Find an available port
+        sock = socket.socket()
+        sock.bind(('', 0))
+        self.proxy_port = sock.getsockname()[1]
+        sock.close()
+        
+        # Start HTTP server for JSON endpoints
+        from aiohttp import web, ClientSession
+        
+        async def handle_json_endpoint(request):
+            """Proxy HTTP requests to the tunnel and rewrite WebSocket URLs."""
+            path = request.path_qs
+            tunnel_url = f"{self.remote_browser_url.rstrip('/')}{path}"
+            
+            async with ClientSession() as session:
+                async with session.get(tunnel_url) as response:
+                    content = await response.text()
+                    
+                    # Parse and rewrite WebSocket URLs in JSON responses
+                    if 'application/json' in response.headers.get('content-type', ''):
+                        try:
+                            import json
+                            data = json.loads(content)
+                            
+                            # Rewrite WebSocket URLs in the response
+                            if isinstance(data, dict):
+                                self._rewrite_websocket_urls_in_dict(data)
+                            elif isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        self._rewrite_websocket_urls_in_dict(item)
+                            
+                            content = json.dumps(data)
+                        except (json.JSONDecodeError, Exception) as e:
+                            LOG.warning("Failed to parse/rewrite JSON response", error=str(e))
+                    
+                    return web.Response(
+                        text=content,
+                        status=response.status,
+                        headers=dict(response.headers)
+                    )
+        
+        app = web.Application()
+        app.router.add_route('*', '/{path:.*}', handle_json_endpoint)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self.http_server = web.TCPSite(runner, 'localhost', self.proxy_port)
+        await self.http_server.start()
+        
+        # Start the WebSocket proxy server on a different port
+        ws_sock = socket.socket()
+        ws_sock.bind(('', 0))
+        ws_port = ws_sock.getsockname()[1]
+        ws_sock.close()
+        
+        self.proxy_server = await websockets.serve(
+            self._handle_websocket,
+            "localhost",
+            ws_port
+        )
+        self.ws_port = ws_port
+        self.running = True
+        LOG.info("Started tunnel proxy", http_port=self.proxy_port, ws_port=ws_port, tunnel_host=self.tunnel_host)
+        return self.proxy_port
+        
+    def _rewrite_websocket_urls_in_dict(self, data: dict):
+        """Rewrite WebSocket URLs in a dictionary to point to our proxy."""
+        for key, value in data.items():
+            if isinstance(value, str) and 'ws://' in value and 'localhost' in value:
+                # Replace localhost WebSocket URL with our proxy
+                parsed = urlparse(value)
+                new_url = f"ws://localhost:{self.ws_port}{parsed.path}"
+                data[key] = new_url
+                LOG.info("Rewrote WebSocket URL", original=value, rewritten=new_url)
+            elif key.endswith('DebuggerUrl') and isinstance(value, str):
+                # Handle specific debugger URL fields
+                parsed = urlparse(value)
+                if 'localhost' in value:
+                    new_url = f"ws://localhost:{self.ws_port}{parsed.path}"
+                    data[key] = new_url
+                    LOG.info("Rewrote debugger URL", original=value, rewritten=new_url)
+        
+    async def stop_proxy(self):
+        """Stop the WebSocket proxy server."""
+        if self.proxy_server:
+            self.proxy_server.close()
+            await self.proxy_server.wait_closed()
+        if self.http_server:
+            await self.http_server.stop()
+        self.running = False
+        LOG.info("Stopped WebSocket tunnel proxy")
+            
+    async def _handle_websocket(self, websocket, path):
+        """Handle incoming WebSocket connections and proxy them to the tunnel."""
+        tunnel_url = f"{self.tunnel_scheme}://{self.tunnel_host}{path}"
+        LOG.info("Proxying WebSocket connection", original_path=path, tunnel_url=tunnel_url)
+        
+        try:
+            # Connect to the actual tunnel WebSocket
+            async with websockets.connect(tunnel_url) as tunnel_ws:
+                # Start bidirectional proxying
+                await asyncio.gather(
+                    self._proxy_messages(websocket, tunnel_ws),
+                    self._proxy_messages(tunnel_ws, websocket),
+                    return_exceptions=True
+                )
+        except Exception as e:
+            LOG.error("WebSocket proxy error", error=str(e), tunnel_url=tunnel_url)
+            await websocket.close()
+            
+    async def _proxy_messages(self, source, target):
+        """Proxy messages from source to target WebSocket."""
+        try:
+            async for message in source:
+                await target.send(message)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception as e:
+            LOG.error("Error proxying WebSocket message", error=str(e))
+
+
+async def _create_cdp_tunnel_connection(
+    playwright: Playwright,
+    remote_browser_url: str,
+    extra_http_headers: dict[str, str] | None = None,
+) -> tuple[BrowserContext, BrowserArtifacts, BrowserCleanupFunc]:
+    """
+    Create a CDP connection through a tunnel with WebSocket URL rewriting.
+    """
+    parsed_remote_url = urlparse(remote_browser_url)
+    tunnel_scheme = "wss" if parsed_remote_url.scheme == "https" else "ws"
+    
+    # Create and start the WebSocket proxy
+    proxy = WebSocketTunnelProxy(parsed_remote_url.netloc, tunnel_scheme, remote_browser_url)
+    proxy_port = await proxy.start_proxy()
+    
+    # Create a modified remote debugging URL that points to our proxy
+    proxy_url = f"http://localhost:{proxy_port}"
+    
+    LOG.info("Using WebSocket proxy for tunnel connection", 
+             original_url=remote_browser_url, 
+             proxy_url=proxy_url)
+    
+    try:
+        # Connect using the proxy URL
+        browser = await playwright.chromium.connect_over_cdp(proxy_url)
+        
+        browser_args = BrowserContextFactory.build_browser_args(extra_http_headers=extra_http_headers)
+        browser_artifacts = BrowserContextFactory.build_browser_artifacts(
+            har_path=browser_args["record_har_path"],
+        )
+        
+        contexts = browser.contexts
+        browser_context = None
+
+        if contexts:
+            LOG.info("Using existing browser context")
+            browser_context = contexts[0]
+        else:
+            browser_context = await browser.new_context(
+                record_video_dir=browser_args["record_video_dir"],
+                viewport=browser_args["viewport"],
+                extra_http_headers=browser_args["extra_http_headers"],
+            )
+            
+        # Create a cleanup function that stops the proxy
+        def cleanup():
+            asyncio.create_task(proxy.stop_proxy())
+            
+        return browser_context, browser_artifacts, cleanup
+        
+    except Exception as e:
+        # Make sure to clean up the proxy if connection fails
+        await proxy.stop_proxy()
+        raise
+
+
+async def _create_cdp_connection_browser_with_tunnel_support(
+    playwright: Playwright,
+    proxy_location: ProxyLocation | None = None,
+    extra_http_headers: dict[str, str] | None = None,
+    **kwargs: dict,
+) -> tuple[BrowserContext, BrowserArtifacts, BrowserCleanupFunc]:
+    """
+    Enhanced CDP connection function that provides full tunnel support with WebSocket rewriting.
+    
+    This function detects tunnel scenarios and automatically sets up WebSocket proxying
+    to handle localhost URL rewriting issues common with tunneling solutions like Cloudflare.
+    """
+    browser_type = settings.BROWSER_TYPE
+    browser_path = settings.CHROME_EXECUTABLE_PATH
+    remote_browser_url = settings.BROWSER_REMOTE_DEBUGGING_URL
+
+    if browser_type == "cdp-connect" and browser_path:
+        LOG.info("Local browser path is given. Connecting to local browser with CDP", browser_path=browser_path)
+        # First check if the debugging port is running and can be used
+        if not _is_port_in_use(9222):
+            LOG.info("Port 9222 is not in use, starting Chrome", browser_path=browser_path)
+            # Check if Chrome is already running
+            if _is_chrome_running():
+                raise Exception(
+                    "Chrome is already running. Please close all Chrome instances before starting with remote debugging."
+                )
+            # check if ./tmp/user_data_dir exists and if it's a valid Chromium user data directory
+            try:
+                if os.path.exists("./tmp/user_data_dir") and not is_valid_chromium_user_data_dir("./tmp/user_data_dir"):
+                    LOG.info("Removing invalid user data directory")
+                    shutil.rmtree("./tmp/user_data_dir")
+                    shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+                elif not os.path.exists("./tmp/user_data_dir"):
+                    LOG.info("Copying default user data directory")
+                    shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+                else:
+                    LOG.info("User data directory is valid")
+            except FileExistsError:
+                # If directory exists, remove it first then copy
+                shutil.rmtree("./tmp/user_data_dir")
+                shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+            browser_process = subprocess.Popen(
+                [
+                    browser_path,
+                    "--remote-debugging-port=9222",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--remote-debugging-address=0.0.0.0",
+                    "--user-data-dir=./tmp/user_data_dir",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            # Add small delay to allow browser to start
+            time.sleep(1)
+            if browser_process.poll() is not None:
+                raise Exception(f"Failed to open browser. browser_path: {browser_path}")
+        else:
+            LOG.info("Port 9222 is in use, using existing browser")
+
+    # Check if we're using a tunnel (non-localhost URL)
+    parsed_remote_url = urlparse(remote_browser_url)
+    is_tunnel = parsed_remote_url.hostname not in ["localhost", "127.0.0.1"] and parsed_remote_url.scheme in ["http", "https"]
+    
+    if is_tunnel:
+        LOG.info("Detected tunnel URL, using WebSocket proxy approach", tunnel_host=parsed_remote_url.netloc)
+        
+        # First, check if the tunnel endpoint is reachable
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{remote_browser_url.rstrip('/')}/json/version", timeout=10)
+                response.raise_for_status()
+                version_info = response.json()
+                websocket_url = version_info.get("webSocketDebuggerUrl", "")
+                
+                LOG.info("Browser info retrieved from tunnel", websocket_url=websocket_url)
+                
+                # Check if WebSocket URL contains localhost (indicating rewriting is needed)
+                if websocket_url and "localhost" in websocket_url:
+                    LOG.info("WebSocket URL contains localhost, will use proxy approach")
+                    return await _create_cdp_tunnel_connection(playwright, remote_browser_url, extra_http_headers)
+                    
+        except httpx.RequestError as e:
+            LOG.error("Failed to connect to tunnel endpoint", error=str(e))
+            raise Exception(f"Failed to connect to tunnel at {remote_browser_url}: {e}") from e
+    
+    # Standard connection (local or tunnel that doesn't need rewriting)
+    browser_args = BrowserContextFactory.build_browser_args(extra_http_headers=extra_http_headers)
+    browser_artifacts = BrowserContextFactory.build_browser_artifacts(
+        har_path=browser_args["record_har_path"],
+    )
+
+    LOG.info("Connecting browser CDP connection", remote_browser_url=remote_browser_url)
+    
+    try:
+        browser = await playwright.chromium.connect_over_cdp(remote_browser_url)
+    except Exception as e:
+        error_message = str(e)
+        
+        # Provide helpful error message for tunnel issues
+        if is_tunnel and ("localhost" in error_message or "ECONNREFUSED" in error_message):
+            LOG.error("CDP connection failed with tunnel URL", 
+                     remote_url=remote_browser_url, error=error_message)
+            
+            tunnel_fix_message = f"""
+Failed to connect to Chrome via CDP tunnel.
+
+Remote URL: {remote_browser_url}
+Error: {error_message}
+
+This may be due to:
+1. Tunnel configuration issues with WebSocket forwarding
+2. Chrome browser not accessible through the tunnel
+3. Network connectivity problems
+
+Please verify:
+- Your tunnel is properly configured and running
+- Chrome is accessible at the tunnel URL
+- WebSocket connections are properly forwarded by your tunnel
+"""
+            raise Exception(tunnel_fix_message) from e
+        else:
+            LOG.error("CDP connection failed", remote_url=remote_browser_url, error=error_message)
+            raise
+
+    contexts = browser.contexts
+    browser_context = None
+
+    if contexts:
+        # Use the first existing context if available
+        LOG.info("Using existing browser context")
+        browser_context = contexts[0]
+    else:
+        browser_context = await browser.new_context(
+            record_video_dir=browser_args["record_video_dir"],
+            viewport=browser_args["viewport"],
+            extra_http_headers=browser_args["extra_http_headers"],
+        )
+    LOG.info(
+        "Launched browser CDP connection",
+        remote_browser_url=remote_browser_url,
+    )
+    return browser_context, browser_artifacts, None
+
+
 BrowserContextFactory.register_type("chromium-headless", _create_headless_chromium)
 BrowserContextFactory.register_type("chromium-headful", _create_headful_chromium)
-BrowserContextFactory.register_type("cdp-connect", _create_cdp_connection_browser)
+BrowserContextFactory.register_type("cdp-connect", _create_cdp_connection_browser_with_tunnel_support)
+BrowserContextFactory.register_type("cdp-connect-tunnel", _create_cdp_connection_browser_with_tunnel_support)
 
 
 class BrowserState:
