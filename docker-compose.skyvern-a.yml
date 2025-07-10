@@ -5,8 +5,8 @@ services:
     image: public.ecr.aws/skyvern/skyvern:latest
     restart: on-failure
     ports:
-      - "8001:8000"        # Skyvern API
-      - "9223:9222"        # For browser automation via CDP
+      - "8000:8000"        # Skyvern API
+      - "9222:9222"        # For browser automation via CDP
     env_file:
       - .env
     volumes:
